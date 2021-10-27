@@ -107,4 +107,5 @@ venv.bak/
 .mypy_cache/
 
 output/
+data/
 .DS_Store

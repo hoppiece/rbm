@@ -5,40 +5,37 @@ import torch.utils.data
 
 
 class RBM(nn.Module):
-    r"""Restricted Boltzmann Machine.
-    Args:
-        n_vis (int, optional): The size of visible layer. Defaults to 784.
-        n_hid (int, optional): The size of hidden layer. Defaults to 128.
-        k (int, optional): The number of Gibbs sampling. Defaults to 1.
-    """
+    """Restricted Boltzmann Machine."""
 
     def __init__(self, n_vis, n_hid, k=1, *args, **kwargs):
         """Create a RBM."""
-        super(RBM, self).__init__()
-        self.v = nn.Parameter(torch.randn(1, n_vis))
-        self.h = nn.Parameter(torch.randn(1, n_hid))
-        self.W = nn.Parameter(torch.randn(n_hid, n_vis))
-        self.k = k
+        super().__init__()
+        self.a = nn.Parameter(torch.randn(1, n_vis))  # Bias for visible units
+        self.b = nn.Parameter(torch.randn(1, n_hid))  # Bias for hidden units
+        self.W = nn.Parameter(torch.randn(n_hid, n_vis))  # Weight parameter
+        self.k = k  # The number of iteration in CD-k method
 
-    def visible_to_hidden(self, v):
-        r"""Conditional sampling a hidden variable given a visible variable.
+    def encode(self, v, binarize=False):
+        """Conditional sampling a hidden variable given a visible variable.
         Args:
             v (Tensor): The visible variable.
+            binarize (bool): Applying Bernoulli sampling. Default, False.
         Returns:
             Tensor: The hidden variable.
         """
-        p = torch.sigmoid(F.linear(v, self.W, self.h))
-        return p.bernoulli()
+        p = torch.sigmoid(F.linear(v, self.W, self.b))
+        return p.bernoulli() if binarize else p
 
-    def hidden_to_visible(self, h):
+    def decode(self, h, binarize=False):
         r"""Conditional sampling a visible variable given a hidden variable.
         Args:
             h (Tendor): The hidden variable.
+            binarize (bool): Applying Bernoulli sampling. Default, False.
         Returns:
             Tensor: The visible variable.
         """
-        p = torch.sigmoid(F.linear(h, self.W.t(), self.v))
-        return p.bernoulli()
+        p = torch.sigmoid(F.linear(h, self.W.t(), self.a))
+        return p.bernoulli() if binarize else p
 
     def free_energy(self, v):
         r"""Free energy function.
@@ -52,23 +49,30 @@ class RBM(nn.Module):
         Returns:
             FloatTensor: The free energy value.
         """
-        v_term = torch.matmul(v, self.v.t())
-        w_x_h = F.linear(v, self.W, self.h)
+        v_term = torch.matmul(v, self.a.t())
+        w_x_h = F.linear(v, self.W, self.b)
         h_term = torch.sum(F.softplus(w_x_h), dim=1)
         return torch.mean(-h_term - v_term)
 
+    def gibbs_sampling(self, v):
+        for _ in range(self.k - 1):
+            h = self.encode(v, binarize=True)  # Binary
+            v = self.decode(h, binarize=False)  # Real
+        h = self.encode(v, binarize=False)  # Real
+        v = self.decode(h.bernoulli(), binarize=False)  # Real
+        return v, h
+
     def forward(self, v):
-        r"""Compute the real and generated examples.
-        Args:
-            v (Tensor): The visible variable.
-        Returns:
-            (Tensor, Tensor): The real and generagted variables.
-        """
-        h = self.visible_to_hidden(v)
-        for _ in range(self.k):
-            v_gibb = self.hidden_to_visible(h)
-            h = self.visible_to_hidden(v_gibb)
-        return v_gibb
+        v, h = self.gibbs_sampling(v)
+        return v
+
+    def visible_to_hidden(self, v):
+        # Depreciated
+        return self.encode(v, binarize=True)
+
+    def hidden_to_visible(self, h):
+        # Depreciated
+        return self.decode(h, binarize=True)
 
 
 class Encoder(nn.Module):

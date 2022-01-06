@@ -6,6 +6,9 @@ from torchvision import datasets, transforms
 import pytorch_lightning as pl
 from dataclasses import dataclass
 
+import numpy as np
+import math
+
 
 class RBM(nn.Module):
     """Restricted Boltzmann Machine."""
@@ -101,7 +104,7 @@ class RBM(nn.Module):
         self.a.data += eta * torch.sum(v0 - vk, 0)
         self.b.data += eta * torch.sum(h0 - hk, 0)
 
-        return F.mse_loss(v0, vk) / batch
+        return F.mse_loss(v0, vk)
 
     def recon_loss(self, tensor):
         batch = tensor.size(0)
@@ -113,10 +116,10 @@ class RBM(nn.Module):
 
 class AutoEncoder(nn.Module):
     def __init__(self, conf):
+        super().__init__()
         self.conf = conf
         n_vis = conf.n_vis
         n_hid = conf.n_hid
-        super().__init__()
         self.encoder = nn.Sequential(nn.Linear(n_vis, n_hid), nn.ReLU())
         self.decoder = nn.Sequential(nn.Linear(n_hid, n_vis), nn.ReLU())
         if conf.optimizer == "None":
@@ -125,6 +128,12 @@ class AutoEncoder(nn.Module):
             self.optimizer = torch.optim.SGD(self.parameters(), lr=self.conf.lr)
         elif conf.optimizer == "adam":
             self.optimizer = torch.optim.Adam(self.parameters(), lr=self.conf.lr)
+        elif conf.optimizer == "momentum":
+            self.optimizer = torch.optim.SGD(
+                self.parameters(), lr=self.conf.lr, momentum=0.9
+            )
+        elif conf.optimizer == "rmsprop":
+            self.optimizer = torch.optim.RMSprop(self.parameters(), lr=self.conf.lr)
 
     def encode(self, v):
         return self.encoder(v)
@@ -158,6 +167,108 @@ class AutoEncoder(nn.Module):
         return loss
 
 
+class MLPAutoEncoder(AutoEncoder):
+    def __init__(self, conf):
+        super().__init__(conf)
+        self.conf = conf
+        L = 3
+
+        n_vis = conf.n_vis
+        n_hid = conf.n_hid
+        n_mids = [
+            n_vis + round((n_hid - n_vis) / L * i) for i in range(1, L)
+        ]  # Interpolate the number of middle layers between vis and hid.
+
+        self.encoder = nn.Sequential(
+            nn.Linear(n_vis, n_mids[0]),
+            nn.ReLU(),
+            nn.Linear(n_mids[0], n_mids[1]),
+            nn.ReLU(),
+            nn.Linear(n_mids[1], n_hid),
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(n_hid, n_mids[1]),
+            nn.ReLU(),
+            nn.Linear(n_mids[1], n_mids[0]),
+            nn.ReLU(),
+            nn.Linear(n_mids[0], n_vis),
+        )
+        if conf.optimizer == "None":
+            self.optimizer = torch.optim.SGD(self.parameters(), lr=self.conf.lr)
+        elif conf.optimizer == "sgd":
+            self.optimizer = torch.optim.SGD(self.parameters(), lr=self.conf.lr)
+        elif conf.optimizer == "adam":
+            self.optimizer = torch.optim.Adam(self.parameters(), lr=self.conf.lr)
+
+
+class VAE(nn.Module):
+    def __init__(self, conf):
+        super().__init__()
+        self.conf = conf
+        n_vis = conf.n_vis
+        n_hid = conf.n_hid
+        self.encoder_mean = nn.Sequential(nn.Linear(n_vis, n_hid), nn.ReLU())
+        self.encoder_var = nn.Sequential(nn.Linear(n_vis, n_hid), nn.ReLU())
+        self.decoder = nn.Sequential(nn.Linear(n_hid, n_vis), nn.Sigmoid())
+
+        if conf.optimizer == "None":
+            self.optimizer = torch.optim.SGD(self.parameters(), lr=self.conf.lr)
+        elif conf.optimizer == "sgd":
+            self.optimizer = torch.optim.SGD(self.parameters(), lr=self.conf.lr)
+        elif conf.optimizer == "adam":
+            self.optimizer = torch.optim.Adam(self.parameters(), lr=self.conf.lr)
+
+    def enc_param(self, v):
+        mean, log_var = self.encoder_mean(v), self.encoder_var(v)
+        return mean, log_var
+
+    def sample_h(self, mean, log_var):  # May be occur device errors.
+        epsilon = torch.randn(mean.shape).to(self.conf.device)
+        h = mean + epsilon * torch.exp(0.5 * log_var)
+        return h
+
+    def encode(self, v):
+        mean, var = self.enc_param(v)
+        h = self.sample_h(mean, var)
+        return h
+
+    def decode(self, h):
+        return self.decoder(h)
+
+    def forward(self, x):
+        x = self.encode(x)
+        x = self.decode(x)
+        return x
+
+    def recon_loss(self, tensor):
+        batch = tensor.size(0)
+        v = tensor.view(batch, -1)
+        recon = self.forward(v)
+        loss = F.mse_loss(v, recon)
+        return loss
+
+    def loss(self, tensor):
+        batch = tensor.size(0)
+        x = tensor.view(batch, -1)
+        mean, log_var = self.enc_param(x)
+        KL = 0.5 * torch.sum(1 + log_var - mean ** 2 - torch.exp(log_var))
+
+        z = self.sample_h(mean, log_var)
+        x_hat = self.decode(z)
+        reconstruction = torch.sum(
+            x * torch.log(x_hat + 1e-8) + (1 - x) * torch.log(1 - x_hat + 1e-8)
+        )
+        lower_bound = -(KL + reconstruction)
+        return lower_bound
+
+    def train_step(self, tensor, *args, **kwargs):
+        loss = self.loss(tensor)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        return loss
+
+
 def prepare_mnist(batch_size=128):
     train_datasets = datasets.MNIST(
         root="./data",
@@ -179,7 +290,34 @@ def prepare_mnist(batch_size=128):
         transform=transforms.Compose([transforms.ToTensor()]),
     )
     test_loader = torch.utils.data.DataLoader(
-        dataset=test_datasets, batch_size=batch_size, shuffle=True
+        dataset=test_datasets, batch_size=batch_size
+    )
+
+    return train_datasets, train_loader, test_datasets, test_loader
+
+
+def prepare_fashion_mnist(batch_size=128):
+    train_datasets = datasets.FashionMNIST(
+        root="./data",
+        train=True,
+        download=True,
+        transform=transforms.Compose(
+            [transforms.ToTensor(), transforms.Normalize(0, 1)]
+        ),
+    )
+    train_loader = torch.utils.data.DataLoader(
+        dataset=train_datasets,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+    test_datasets = datasets.FashionMNIST(
+        root="./data",
+        train=False,
+        download=True,
+        transform=transforms.Compose([transforms.ToTensor()]),
+    )
+    test_loader = torch.utils.data.DataLoader(
+        dataset=test_datasets, batch_size=batch_size
     )
 
     return train_datasets, train_loader, test_datasets, test_loader
@@ -192,4 +330,13 @@ class ModelConf:
     n_vis: int = 784
     lr: float = 0.01
     n_epoch: int = 30
-    optimizer: str = "None"
+    optimizer: str = ""
+    dataset: str = ""
+    model_name: str = ""
+    whitening_vis: bool = False
+    whitening_learn: bool = False
+
+
+@dataclass
+class MNISTConf(ModelConf):
+    pass

@@ -5,6 +5,7 @@ import torch.utils.data
 from torchvision import datasets, transforms
 import pytorch_lightning as pl
 from dataclasses import dataclass
+import dataclasses
 
 import numpy as np
 import math
@@ -199,6 +200,12 @@ class MLPAutoEncoder(AutoEncoder):
             self.optimizer = torch.optim.SGD(self.parameters(), lr=self.conf.lr)
         elif conf.optimizer == "adam":
             self.optimizer = torch.optim.Adam(self.parameters(), lr=self.conf.lr)
+        elif conf.optimizer == "momentum":
+            self.optimizer = torch.optim.SGD(
+                self.parameters(), lr=self.conf.lr, momentum=0.9
+            )
+        elif conf.optimizer == "rmsprop":
+            self.optimizer = torch.optim.RMSprop(self.parameters(), lr=self.conf.lr)
 
 
 class VAE(nn.Module):
@@ -217,6 +224,12 @@ class VAE(nn.Module):
             self.optimizer = torch.optim.SGD(self.parameters(), lr=self.conf.lr)
         elif conf.optimizer == "adam":
             self.optimizer = torch.optim.Adam(self.parameters(), lr=self.conf.lr)
+        elif conf.optimizer == "momentum":
+            self.optimizer = torch.optim.SGD(
+                self.parameters(), lr=self.conf.lr, momentum=0.9
+            )
+        elif conf.optimizer == "rmsprop":
+            self.optimizer = torch.optim.RMSprop(self.parameters(), lr=self.conf.lr)
 
     def enc_param(self, v):
         mean, log_var = self.encoder_mean(v), self.encoder_var(v)
@@ -323,6 +336,32 @@ def prepare_fashion_mnist(batch_size=128):
     return train_datasets, train_loader, test_datasets, test_loader
 
 
+def prepare_cifar10(batch_size=128):
+    train_datasets = datasets.CIFAR10(
+        root="./data",
+        train=True,
+        download=True,
+        transform=transforms.Compose(
+            [transforms.ToTensor(), transforms.Normalize(0, 1)]
+        ),
+    )
+    train_loader = torch.utils.data.DataLoader(
+        dataset=train_datasets,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+    test_datasets = datasets.CIFAR10(
+        root="./data",
+        train=False,
+        download=True,
+        transform=transforms.Compose([transforms.ToTensor()]),
+    )
+    test_loader = torch.utils.data.DataLoader(
+        dataset=test_datasets, batch_size=batch_size
+    )
+    return train_datasets, train_loader, test_datasets, test_loader
+
+
 @dataclass
 class ModelConf:
     batch_size: int = 128
@@ -335,6 +374,13 @@ class ModelConf:
     model_name: str = ""
     whitening_vis: bool = False
     whitening_learn: bool = False
+
+    def __str__(self):
+        d = dataclasses.asdict(self)
+        tags = "/"
+        for key, val in d.items():
+            tags += f"{key}={str(val)}/"
+        return tags
 
 
 @dataclass

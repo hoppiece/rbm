@@ -16,9 +16,6 @@ from sklearn.decomposition import PCA
 import matplotlib.cm as cm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-import plfit
-from pylab import *
-
 
 def zca_whitening_matrix(X):
     """
@@ -74,8 +71,8 @@ if __name__ == "__main__":
             lr=0.01,
             n_epoch=n_epoch,
             dataset=dataset,
-            optimizer="",
-            model_name="rbm",
+            optimizer=optimizer,
+            model_name=model_name,
             whitening_vis=whitening_vis,
             whitening_learn=whitening_learn,
         )
@@ -84,11 +81,18 @@ if __name__ == "__main__":
             (True, False),
             (True, True),
         ]
+        for model_name in ["autoencoder", "vae"]
         for n_hid in [100, 1000, 10]
         for n_epoch in [10, 30]
         for dataset in [
             "mnist",
             "fashion_mnist",
+        ]
+        for optimizer in [
+            "sgd",
+            "adam",
+            "momentum",
+            "rmsprop",
         ]
     ]
 

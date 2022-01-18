@@ -9,6 +9,7 @@ import dataclasses
 
 import numpy as np
 import math
+from collections import OrderedDict
 
 
 class RBM(nn.Module):
@@ -122,7 +123,7 @@ class AutoEncoder(nn.Module):
         n_vis = conf.n_vis
         n_hid = conf.n_hid
         self.encoder = nn.Sequential(nn.Linear(n_vis, n_hid), nn.ReLU())
-        self.decoder = nn.Sequential(nn.Linear(n_hid, n_vis), nn.ReLU())
+        self.decoder = nn.Sequential(nn.Linear(n_hid, n_vis), nn.Sigmoid())
         if conf.optimizer == "None":
             self.optimizer = torch.optim.SGD(self.parameters(), lr=self.conf.lr)
         elif conf.optimizer == "sgd":
@@ -131,10 +132,12 @@ class AutoEncoder(nn.Module):
             self.optimizer = torch.optim.Adam(self.parameters(), lr=self.conf.lr)
         elif conf.optimizer == "momentum":
             self.optimizer = torch.optim.SGD(
-                self.parameters(), lr=self.conf.lr, momentum=0.9
+                self.parameters(), lr=self.conf.lr, momentum=0.9, dampening=0.9
             )
         elif conf.optimizer == "rmsprop":
             self.optimizer = torch.optim.RMSprop(self.parameters(), lr=self.conf.lr)
+        else:
+            raise ValueError("Failed to initialize of optimizer")
 
     def encode(self, v):
         return self.encoder(v)
@@ -166,6 +169,14 @@ class AutoEncoder(nn.Module):
         loss.backward()
         self.optimizer.step()
         return loss
+
+
+class AutoEncoderCifar10(AutoEncoder):
+    def __init__(self, conf):
+        super().__init__(conf)
+        n_vis = conf.n_vis
+        n_hid = conf.n_vis // 8
+        self.encoder = nn.Sequential(nn.Linear(n_vis, n_vis // 2), nn.ReLU())
 
 
 class MLPAutoEncoder(AutoEncoder):
@@ -202,7 +213,7 @@ class MLPAutoEncoder(AutoEncoder):
             self.optimizer = torch.optim.Adam(self.parameters(), lr=self.conf.lr)
         elif conf.optimizer == "momentum":
             self.optimizer = torch.optim.SGD(
-                self.parameters(), lr=self.conf.lr, momentum=0.9
+                self.parameters(), lr=self.conf.lr, momentum=0.9, dampening=0.9
             )
         elif conf.optimizer == "rmsprop":
             self.optimizer = torch.optim.RMSprop(self.parameters(), lr=self.conf.lr)
@@ -215,7 +226,16 @@ class VAE(nn.Module):
         n_vis = conf.n_vis
         n_hid = conf.n_hid
         self.encoder_mean = nn.Sequential(nn.Linear(n_vis, n_hid), nn.ReLU())
-        self.encoder_var = nn.Sequential(nn.Linear(n_vis, n_hid), nn.ReLU())
+        # https://stackoverflow.com/questions/49634488/keras-variational-autoencoder-nan-loss
+        self.encoder_var = nn.Sequential(
+            OrderedDict(
+                [
+                    ("enc_var_fc1", nn.Linear(n_vis, n_hid)),
+                    ("enc_var_relu1", nn.ReLU()),
+                ]
+            )
+        )
+        torch.nn.init.zeros_(self.encoder_var.enc_var_fc1.weight)
         self.decoder = nn.Sequential(nn.Linear(n_hid, n_vis), nn.Sigmoid())
 
         if conf.optimizer == "None":
@@ -226,7 +246,7 @@ class VAE(nn.Module):
             self.optimizer = torch.optim.Adam(self.parameters(), lr=self.conf.lr)
         elif conf.optimizer == "momentum":
             self.optimizer = torch.optim.SGD(
-                self.parameters(), lr=self.conf.lr, momentum=0.9
+                self.parameters(), lr=self.conf.lr, momentum=0.9, dampening=0.9
             )
         elif conf.optimizer == "rmsprop":
             self.optimizer = torch.optim.RMSprop(self.parameters(), lr=self.conf.lr)
@@ -235,8 +255,9 @@ class VAE(nn.Module):
         mean, log_var = self.encoder_mean(v), self.encoder_var(v)
         return mean, log_var
 
-    def sample_h(self, mean, log_var):  # May be occur device errors.
+    def sample_h(self, mean, log_var):
         epsilon = torch.randn(mean.shape).to(self.conf.device)
+        # Next code sometimes makes NaN for large log_var, so weights of self.encoder_var are initialized to zero.
         h = mean + epsilon * torch.exp(0.5 * log_var)
         return h
 
@@ -264,15 +285,16 @@ class VAE(nn.Module):
         batch = tensor.size(0)
         x = tensor.view(batch, -1)
         mean, log_var = self.enc_param(x)
+        delta = 1e-8
         KL = 0.5 * torch.sum(1 + log_var - mean ** 2 - torch.exp(log_var))
 
         z = self.sample_h(mean, log_var)
         x_hat = self.decode(z)
         reconstruction = torch.sum(
-            x * torch.log(x_hat + 1e-8) + (1 - x) * torch.log(1 - x_hat + 1e-8)
+            x * torch.log(x_hat + delta) + (1 - x) * torch.log(1 - x_hat + delta)
         )
-        lower_bound = -(KL + reconstruction)
-        return lower_bound
+        lower_bound = KL + reconstruction
+        return -lower_bound
 
     def train_step(self, tensor, *args, **kwargs):
         loss = self.loss(tensor)
@@ -309,6 +331,40 @@ def prepare_mnist(batch_size=128):
     return train_datasets, train_loader, test_datasets, test_loader
 
 
+def prepare_sub_mnist(batch_size=128, n_set=5):
+    train_datasets = datasets.MNIST(
+        root="./data",
+        train=True,
+        download=True,
+        transform=transforms.Compose(
+            [transforms.ToTensor(), transforms.Normalize(1, 0)]
+        ),
+    )
+    train_mask = train_datasets.targets == 5
+    train_datasets.data = train_datasets.data[train_mask]
+    train_datasets.targets = train_datasets.targets[train_mask]
+
+    test_datasets = datasets.MNIST(
+        root="./data",
+        train=False,
+        download=True,
+        transform=transforms.Compose([transforms.ToTensor()]),
+    )
+    test_mask = test_datasets.targets < n_set
+    test_datasets.data = test_datasets.data[test_mask]
+    test_datasets.targets = test_datasets.targets[test_mask]
+
+    train_loader = torch.utils.data.DataLoader(
+        dataset=train_datasets,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+    test_loader = torch.utils.data.DataLoader(
+        dataset=test_datasets, batch_size=batch_size
+    )
+    return train_datasets, train_loader, test_datasets, test_loader
+
+
 def prepare_fashion_mnist(batch_size=128):
     train_datasets = datasets.FashionMNIST(
         root="./data",
@@ -341,9 +397,7 @@ def prepare_cifar10(batch_size=128):
         root="./data",
         train=True,
         download=True,
-        transform=transforms.Compose(
-            [transforms.ToTensor(), transforms.Normalize(0, 1)]
-        ),
+        transform=transforms.Compose([transforms.ToTensor(), transforms.Grayscale()]),
     )
     train_loader = torch.utils.data.DataLoader(
         dataset=train_datasets,
@@ -354,7 +408,7 @@ def prepare_cifar10(batch_size=128):
         root="./data",
         train=False,
         download=True,
-        transform=transforms.Compose([transforms.ToTensor()]),
+        transform=transforms.Compose([transforms.ToTensor(), transforms.Grayscale()]),
     )
     test_loader = torch.utils.data.DataLoader(
         dataset=test_datasets, batch_size=batch_size
